@@ -29,7 +29,7 @@ function normalizeParam(value: unknown): unknown {
 
 class SqlitePreparedStatement {
 	constructor(
-		private readonly db: Database.Database,
+		private readonly db: Database.Database & { __statements?: Map<string, Database.Statement> },
 		private readonly sql: string,
 		private readonly params: unknown[] = [],
 	) {}
@@ -39,7 +39,14 @@ class SqlitePreparedStatement {
 	}
 
 	private statement() {
-		return this.db.prepare(this.sql);
+		const cache = (this.db as Database.Database & { __statements?: Map<string, Database.Statement> }).__statements
+			?? ((this.db as Database.Database & { __statements?: Map<string, Database.Statement> }).__statements = new Map());
+		let statement = cache.get(this.sql);
+		if (!statement) {
+			statement = this.db.prepare(this.sql);
+			cache.set(this.sql, statement);
+		}
+		return statement;
 	}
 
 	private isRead(): boolean {
@@ -47,14 +54,14 @@ class SqlitePreparedStatement {
 	}
 
 	async first<T = Row>(column?: string): Promise<T | null> {
-		const row = this.statement().get(...this.params) as Row | undefined;
+		const row = this.statement().raw(false).get(...this.params) as Row | undefined;
 		if (!row) return null;
 		return (column ? row[column] : row) as T;
 	}
 
 	async run<T = Row>() {
 		if (this.isRead()) {
-			const results = this.statement().all(...this.params) as T[];
+			const results = this.statement().raw(false).all(...this.params) as T[];
 			return { results, success: true as const, meta: meta() };
 		}
 		const info = this.statement().run(...this.params);
@@ -84,14 +91,29 @@ export class SqliteDatabase {
 	readonly db: Database.Database;
 
 	constructor(filename: string) {
-		this.db = new Database(filename);
+		this.db = new Database(filename) as Database.Database & { __statements?: Map<string, Database.Statement> };
+		(this.db as Database.Database & { __statements?: Map<string, Database.Statement> }).__statements = new Map();
 		this.db.pragma("journal_mode = WAL");
 		this.db.pragma("foreign_keys = ON");
 		this.db.pragma("busy_timeout = 5000");
+		// Stock defaults are correct for the smallest installs, so tuning is
+		// opt-in only — no mailbox-size assumptions baked into the tree.
+		// Larger self-host databases can raise the page cache and mmap window
+		// via env (mmap serves reads straight from the OS page cache), keep
+		// sort materialization in memory, or drop synchronous to NORMAL —
+		// under WAL that cannot corrupt the database, but a power loss can
+		// still roll back the last committed transactions.
+		const cacheKb = Number(process.env.SQLITE_CACHE_KB ?? 0);
+		const mmapBytes = Number(process.env.SQLITE_MMAP_BYTES ?? 0);
+		const synchronous = (process.env.SQLITE_SYNCHRONOUS ?? "").toUpperCase();
+		if (Number.isFinite(cacheKb) && cacheKb > 0) this.db.pragma(`cache_size = -${Math.floor(cacheKb)}`);
+		if (Number.isFinite(mmapBytes) && mmapBytes > 0) this.db.pragma(`mmap_size = ${Math.floor(mmapBytes)}`);
+		if ((process.env.SQLITE_TEMP_STORE ?? "").toLowerCase() === "memory") this.db.pragma("temp_store = memory");
+		if (synchronous === "NORMAL" || synchronous === "OFF") this.db.pragma(`synchronous = ${synchronous}`);
 	}
 
 	prepare(sql: string) {
-		return new SqlitePreparedStatement(this.db, sql);
+		return new SqlitePreparedStatement(this.db as Database.Database & { __statements?: Map<string, Database.Statement> }, sql);
 	}
 
 	/** Run statements atomically, like D1's batch. */

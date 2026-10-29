@@ -5,7 +5,8 @@ const csp = [
 	"img-src 'self' data: blob: https:",
 	"font-src 'self' data:",
 	"connect-src 'self' ws: wss: https://challenges.cloudflare.com",
-	"frame-src https://challenges.cloudflare.com",
+	// 'self' lets the Drive preview show PDFs and text files in an iframe.
+	"frame-src 'self' https://challenges.cloudflare.com",
 	"object-src 'none'",
 	"base-uri 'self'",
 	"form-action 'self'",
@@ -15,6 +16,7 @@ const csp = [
 
 export function getSecurityHeaders() {
 	return [
+		{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive, nosnippet, noimageindex" },
 		{ key: "Content-Security-Policy", value: csp },
 		{ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
 		{ key: "X-Content-Type-Options", value: "nosniff" },

@@ -1,5 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { getDatabaseConfig, withDatabase } from "@/db/with-database";
+import { withStorage } from "@/lib/storage";
 import { openFileBucket } from "./file-bucket";
 import { openMailer, type Mailer, type MailerConfig } from "./mailer";
 import { openAssets, openRateLimiter } from "./misc";
@@ -31,11 +33,13 @@ export function createNodeRuntime(): NodeRuntime {
 	const dataDir = resolve(optional("DATA_DIR") ?? "./data");
 	mkdirSync(join(dataDir, "blobs"), { recursive: true });
 
-	const database = openSqliteDatabase(join(dataDir, "mailflare.sqlite"));
+	// DATABASE_URL moves the data to PostgreSQL, MySQL or libSQL; otherwise it lives in a local SQLite file.
+	const database = getDatabaseConfig({}).driver === "d1" ? openSqliteDatabase(join(dataDir, "mailflare.sqlite")) : undefined;
 	const bucket = openFileBucket(join(dataDir, "blobs"));
 	const mailer = openMailer(mailerConfig());
 	const inboundQueue = openQueue("mailflare-inbound");
 	const outboundQueue = openQueue("mailflare-outbound");
+	const agentQueue = openQueue("mailflare-agent");
 	const realtime = new RealtimeHubRegistry();
 	const publicDir = resolve(optional("PUBLIC_DIR") ?? "./public");
 
@@ -45,11 +49,25 @@ export function createNodeRuntime(): NodeRuntime {
 		EMAIL: mailer,
 		INBOUND_QUEUE: inboundQueue,
 		OUTBOUND_QUEUE: outboundQueue,
+		AGENT_QUEUE: agentQueue,
+		AI_MODEL: optional("AI_MODEL"),
+		AI_BASE_URL: optional("AI_BASE_URL"),
+		AI_API_KEY: optional("AI_API_KEY"),
 		REALTIME: realtime.namespace(),
 		ASSETS: openAssets(publicDir),
 		IMAGES: undefined as unknown as CloudflareEnv["IMAGES"],
 		WORKER_SELF_REFERENCE: undefined as unknown as CloudflareEnv["WORKER_SELF_REFERENCE"],
 		LOGIN_RATE_LIMIT: openRateLimiter(20, 60),
+		DEVICE_LOGIN_RATE_LIMIT: openRateLimiter(10, 60),
+		AGENT_RATE_LIMIT: openRateLimiter(120, 60),
+		B2_KEY_ID: optional("B2_KEY_ID"),
+		B2_APPLICATION_KEY: optional("B2_APPLICATION_KEY"),
+		B2_BUCKET: optional("B2_BUCKET"),
+		B2_ENDPOINT: optional("B2_ENDPOINT"),
+		S3_BUCKET: optional("S3_BUCKET"),
+		S3_REGION: optional("S3_REGION") ?? optional("AWS_REGION"),
+		S3_ACCESS_KEY_ID: optional("S3_ACCESS_KEY_ID") ?? optional("AWS_ACCESS_KEY_ID"),
+		S3_SECRET_ACCESS_KEY: optional("S3_SECRET_ACCESS_KEY") ?? optional("AWS_SECRET_ACCESS_KEY"),
 		CF_TOKEN: optional("CF_TOKEN"),
 		CF_API_KEY: optional("CF_API_KEY"),
 		CF_EMAIL: optional("CF_EMAIL"),
@@ -61,15 +79,21 @@ export function createNodeRuntime(): NodeRuntime {
 		MAILFLARE_RUNTIME: "node",
 		APP_URL: optional("APP_URL")?.replace(/\/$/, ""),
 		INBOUND_WEBHOOK_SECRET: optional("INBOUND_WEBHOOK_SECRET"),
+		VAPID_PUBLIC_KEY: optional("VAPID_PUBLIC_KEY"),
+		VAPID_PRIVATE_KEY: optional("VAPID_PRIVATE_KEY"),
+		VAPID_SUBJECT: optional("VAPID_SUBJECT"),
 	} as unknown as CloudflareEnv;
+	const storageEnv = withDatabase(withStorage(env));
+	realtime.bindEnv(storageEnv);
 
 	return {
-		env,
+		env: storageEnv,
 		dataDir,
-		database: database as unknown as SqliteDatabase,
+		database: database as unknown as SqliteDatabase | undefined,
 		mailer: mailer as unknown as Mailer,
 		inboundQueue: inboundQueue as unknown as InProcessQueue,
 		outboundQueue: outboundQueue as unknown as InProcessQueue,
+		agentQueue: agentQueue as unknown as InProcessQueue,
 		realtime,
 	};
 }

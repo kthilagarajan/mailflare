@@ -1,10 +1,12 @@
-import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { env } from "cloudflare:workers";
 import { getNodeEnv } from "@/lib/runtime";
+import { withDatabase } from "@/db/with-database";
+import { withStorage } from "@/lib/storage";
 
 export function getEnv(): CloudflareEnv {
-	return getNodeEnv() ?? (getCloudflareContext().env as CloudflareEnv);
+	return withDatabase(withStorage(getNodeEnv() ?? (env as CloudflareEnv)));
 }
 
 export async function getEnvAsync(): Promise<CloudflareEnv> {
-	return getNodeEnv() ?? ((await getCloudflareContext({ async: true })).env as CloudflareEnv);
+	return getEnv();
 }

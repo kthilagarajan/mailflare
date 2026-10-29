@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getEmailAddress, splitEmailAddressList } from "@/lib/email/address";
 import { DEFAULT_FOLDER_COLOR, FOLDER_COLOR_VALUES } from "@/lib/folders/colors";
+import { MAX_FOLLOW_UP_DAYS } from "@/lib/follow-ups/follow-up-utils";
 
 /**
  * Recipients arrive either as one comma-separated header string (the composer)
@@ -30,6 +31,9 @@ export const sendEmailSchema = z.object({
 	text: z.string().max(2 * 1024 * 1024).optional(),
 	mailboxId: z.string().min(1).max(200),
 	scheduledAt: z.string().datetime().optional(),
+	undoSend: z.boolean().optional(),
+	trackOpens: z.boolean().optional(),
+	followUpDays: z.number().int().min(1).max(MAX_FOLLOW_UP_DAYS).optional(),
 	attachments: z
 		.array(
 			z.object({
@@ -52,6 +56,7 @@ export const firstRunRegisterSchema = z.object({
 	domain: z.string().min(3),
 	enableSending: z.boolean().optional(),
 	replaceMxRecords: z.boolean().optional(),
+	skipDns: z.boolean().optional(),
 	username: z.string().min(1).max(64).regex(/^[a-zA-Z0-9._%+-]+$/),
 	password: z.string().min(8),
 	resetEmail: z.string().email(),
@@ -72,6 +77,12 @@ export const addDomainSchema = z.object({
 	enableRouting: z.boolean().optional(),
 	enableSending: z.boolean().optional(),
 	replaceMxRecords: z.boolean().optional(),
+	/** Record the domain without adding or checking DNS; a warning shows until it is confirmed. */
+	skipDns: z.boolean().optional(),
+	/** Which service sends mail for the domain; derived from `enableSending` when omitted. */
+	sendingProvider: z.enum(["none", "cloudflare", "resend", "ses"]).optional(),
+	/** Which service receives mail for the domain; Cloudflare Email Routing when omitted. */
+	receivingProvider: z.enum(["none", "cloudflare", "resend", "ses"]).optional(),
 });
 
 export const loginSchema = z.object({
@@ -87,6 +98,12 @@ export const passwordResetConfirmSchema = z.object({
 	token: z.string().min(8).max(200),
 	password: z.string().min(8).max(128),
 });
+
+/** `/api/auth/device`: either email + password, or a challenge + code after MFA. */
+export const deviceLoginSchema = z.union([
+	z.object({ email: z.string().trim().email(), password: z.string().min(1), deviceName: z.string().trim().min(1).max(100) }),
+	z.object({ challengeToken: z.string().min(8).max(200), code: z.string().trim().min(6).max(32), deviceName: z.string().trim().min(1).max(100) }),
+]);
 
 export const mfaVerifySchema = z.object({
 	challengeToken: z.string().min(8).max(200),
@@ -123,9 +140,11 @@ export const updateManagedAccountSchema = z.object({
 	role: z.enum(["admin", "user"]),
 	disabled: z.boolean(),
 	canManageMailboxes: z.boolean(),
+	canManageDomains: z.boolean().optional(),
+	canManageUsers: z.boolean().optional(),
 	forwardingEmail: z.preprocess(
 		(value) => (typeof value === "string" ? value.trim() : value),
-		z.string().email().or(z.literal("")).optional().transform((value) => value === undefined ? undefined : value || null),
+		z.string().email().or(z.literal("")).nullable().optional().transform((value) => value === undefined ? undefined : value || null),
 	),
 	/** Set a new password for the account; every session of that user is revoked. */
 	password: z.preprocess(
@@ -145,11 +164,20 @@ export const createAccountSchema = z.object({
 	),
 });
 
+export const createMailboxAliasSchema = z.object({
+	domainId: z.string().min(1),
+	localPart: z.string().trim().min(1).max(64).regex(/^[a-zA-Z0-9._%+-]+$/)
+		.transform((value) => value.toLowerCase()),
+});
+
 export const createUserAccountSchema = z.object({
 	username: z.string().trim().min(1).max(64).regex(/^[a-zA-Z0-9._%+-]+$/),
 	domainId: z.string().min(1),
 	password: z.string().min(8).max(128),
 	role: z.enum(["admin", "user"]).default("user"),
+	// Existing API/MCP clients retain the previous behavior when this is omitted.
+	useAllDomains: z.boolean().default(true),
+	aliases: z.array(createMailboxAliasSchema).default([]),
 });
 
 export const updateAccountSchema = z.object({
@@ -187,17 +215,6 @@ export const updateMailboxSchema = z.object({
 	useAllDomains: z.boolean().optional(),
 });
 
-export const createMailboxAliasSchema = z.object({
-	domainId: z.string().min(1),
-	localPart: z
-		.string()
-		.trim()
-		.min(1)
-		.max(64)
-		.regex(/^[a-zA-Z0-9._%+-]+$/)
-		.transform((value) => value.toLowerCase()),
-});
-
 export const folderSchema = z.object({
 	mailboxId: z.string().min(1),
 	name: z.string().trim().min(1).max(80),
@@ -231,6 +248,22 @@ export const updateSpamSettingsSchema = z.object({
 	enabled: z.boolean(),
 });
 
+export const updateTrashRetentionSettingsSchema = z.object({
+	days: z.number().int().min(1).max(365).nullable(),
+});
+
+export const updateRemoteContentSettingsSchema = z.object({
+	mode: z.enum(["ask", "new_sender", "allow"]),
+});
+
+export const trustRemoteContentSenderSchema = z.object({
+	sender: z.string().trim().toLowerCase().email().max(320),
+});
+
+export const updateRecipientAddressSettingsSchema = z.object({
+	enabled: z.boolean(),
+});
+
 export const changePasswordSchema = z.object({
 	currentPassword: z.string().min(1),
 	newPassword: z.string().min(8).max(128),
@@ -246,7 +279,8 @@ export const routingRuleSchema = z.object({
 	mailboxId: z.string().min(1),
 	folderId: z.string().optional(),
 	destination: z.string().min(1).optional(),
-	forwardTo: z.string().email().optional(),
+	forwardTo: z.string().trim().email().optional(),
+	keepCopy: z.boolean().optional(),
 	priority: z.number().int().default(0),
 });
 
@@ -260,7 +294,11 @@ export const domainRoutingRuleSchema = z
 		matchValue: z.string().trim().min(1).max(500),
 		action: z.enum(["store", "forward", "reject"]),
 		mailboxId: z.string().min(1).nullish(),
-		forwardTo: z.string().trim().email().nullish(),
+		// The rule dialog submits forwardTo for every action, so blank means "not forwarding".
+		forwardTo: z.preprocess(
+			(value) => (typeof value === "string" ? value.trim() || null : value),
+			z.string().email().nullish(),
+		),
 		keepCopy: z.boolean().default(false),
 		rejectReason: z.string().trim().max(200).nullish(),
 		priority: z.number().int().min(0).max(1000).default(0),
@@ -320,4 +358,5 @@ export const webhookUpdateSchema = z.object({
 		.optional(),
 	enabled: z.boolean().optional(),
 	maxAttempts: z.number().int().min(1).max(10).optional(),
+	rotateSecret: z.literal(true).optional(),
 });
